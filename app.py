@@ -1,91 +1,113 @@
 import streamlit as st
 import requests
 import json
+import urllib.parse
 
 # ---------------------------------------------------
-# 🔧 CONFIG FIREBASE
+# 🔧 CONFIG FIREBASE + GOOGLE
 # ---------------------------------------------------
-FIREBASE_API_KEY = "AIzaSyAwnYSZooGNchbW7APmeykNP8SuuRGVc1Q"   # ← Mets ta vraie clé ici
+FIREBASE_API_KEY = "AIzaSyAwnYSZooGNchbW7APmeykNP8SuuRGVc1Q"        # ← Mets ta vraie clé
+GOOGLE_CLIENT_ID = "383229073387-jq82lcm8b6mpsu1k4afi4s67hhah8n17.apps.googleusercontent.com"       # ← Mets ton vrai client ID
+REDIRECT_URI = "https://1960s-computing-quiz-ijmzegakljwqmpxrd5d83p.streamlit.app/"  # ← Mets ton URL Streamlit Cloud
 
 
 # ---------------------------------------------------
-# 🔐 FONCTIONS AUTH FIREBASE (REST API)
+# 🔐 EXCHANGE GOOGLE CODE → ID TOKEN
 # ---------------------------------------------------
-
-# Email + Password : REGISTER
-def firebase_register(email, password):
-    url = f"https://identitytoolkit.googleapis.com/v1/accounts:signUp?key={FIREBASE_API_KEY}"
+def exchange_google_code(code):
+    token_url = "https://oauth2.googleapis.com/token"
     data = {
-        "email": email,
-        "password": password,
-        "returnSecureToken": True
+        "code": code,
+        "client_id": GOOGLE_CLIENT_ID,
+        "client_secret": "",
+        "redirect_uri": REDIRECT_URI,
+        "grant_type": "authorization_code"
     }
-    res = requests.post(url, json=data)
-    return res.json()
+    res = requests.post(token_url, data=data).json()
+    return res.get("id_token")
 
 
-# Email + Password : LOGIN
-def firebase_login(email, password):
-    url = f"https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key={FIREBASE_API_KEY}"
-    data = {
-        "email": email,
-        "password": password,
-        "returnSecureToken": True
-    }
-    res = requests.post(url, json=data)
-    return res.json()
-
-
-# Google Provider : LOGIN (token manuel)
+# ---------------------------------------------------
+# 🔐 LOGIN GOOGLE → FIREBASE
+# ---------------------------------------------------
 def firebase_google_login(id_token):
     url = f"https://identitytoolkit.googleapis.com/v1/accounts:signInWithIdp?key={FIREBASE_API_KEY}"
-    data = {
+    payload = {
         "postBody": f"id_token={id_token}&providerId=google.com",
-        "requestUri": "http://localhost",
+        "requestUri": REDIRECT_URI,
         "returnIdpCredential": True,
         "returnSecureToken": True
     }
-    res = requests.post(url, json=data)
-    return res.json()
+    res = requests.post(url, json=payload).json()
+    return res
 
 
 # ---------------------------------------------------
-# 🧠 SESSION UTILISATEUR
+# 🔐 LOGIN / REGISTER EMAIL
+# ---------------------------------------------------
+def firebase_register(email, password):
+    url = f"https://identitytoolkit.googleapis.com/v1/accounts:signUp?key={FIREBASE_API_KEY}"
+    data = {"email": email, "password": password, "returnSecureToken": True}
+    return requests.post(url, json=data).json()
+
+def firebase_login(email, password):
+    url = f"https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key={FIREBASE_API_KEY}"
+    data = {"email": email, "password": password, "returnSecureToken": True}
+    return requests.post(url, json=data).json()
+
+
+# ---------------------------------------------------
+# 🧠 SESSION
 # ---------------------------------------------------
 if "user" not in st.session_state:
     st.session_state.user = None
-
 if "score" not in st.session_state:
     st.session_state.score = 0
-
 if "step" not in st.session_state:
     st.session_state.step = 0
 
 
 # ---------------------------------------------------
-# 🔐 LOGIN / REGISTER UI
+# 🔍 CHECK SI GOOGLE A RENVOYÉ UN CODE
+# ---------------------------------------------------
+query_params = st.query_params
+
+if "code" in query_params:
+    code = query_params["code"]
+    id_token = exchange_google_code(code)
+
+    if id_token:
+        res = firebase_google_login(id_token)
+        if "idToken" in res:
+            st.session_state.user = res
+            st.success("Connexion Google réussie !")
+            st.rerun()
+        else:
+            st.error("Erreur Firebase après Google Login")
+
+
+# ---------------------------------------------------
+# 🔐 LOGIN UI
 # ---------------------------------------------------
 if st.session_state.user is None:
 
-    st.title("🔐 Login / Register (Firebase)")
+    st.title("🔐 Connexion")
 
-    tab_login, tab_register, tab_google = st.tabs(["Login", "Register", "Google Login"])
+    tab_login, tab_register, tab_google = st.tabs(["Email Login", "Register", "Google Login"])
 
-    # ---------------- LOGIN ----------------
+    # ---------------- EMAIL LOGIN ----------------
     with tab_login:
         email = st.text_input("Email")
         password = st.text_input("Password", type="password")
 
         if st.button("Login"):
             res = firebase_login(email, password)
-
             if "idToken" in res:
                 st.session_state.user = res
                 st.success("Connexion réussie !")
                 st.rerun()
             else:
                 st.error("Email ou mot de passe incorrect")
-
 
     # ---------------- REGISTER ----------------
     with tab_register:
@@ -94,28 +116,56 @@ if st.session_state.user is None:
 
         if st.button("Register"):
             res = firebase_register(new_email, new_password)
-
             if "idToken" in res:
                 st.success("Compte créé ! Vérifie ton email.")
             else:
                 st.error("Erreur lors de l'inscription")
 
-
-    # ---------------- GOOGLE PROVIDER ----------------
+    # ---------------- GOOGLE LOGIN ----------------
     with tab_google:
-        st.write("Pour Google Login, colle ici ton **ID Token Google** (fourni par Firebase).")
 
-        google_token = st.text_input("Google ID Token")
+        google_auth_url = (
+            "https://accounts.google.com/o/oauth2/v2/auth?"
+            f"client_id={GOOGLE_CLIENT_ID}&"
+            f"redirect_uri={REDIRECT_URI}&"
+            "response_type=code&"
+            "scope=openid%20email%20profile"
+        )
 
-        if st.button("Login with Google"):
-            res = firebase_google_login(google_token)
+        google_button = f"""
+        <style>
+        .google-btn {{
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            background-color: white;
+            border: 1px solid #dadce0;
+            padding: 10px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 16px;
+            font-weight: 500;
+            color: #3c4043;
+            transition: 0.2s;
+        }}
+        .google-btn:hover {{
+            background-color: #f7f8f8;
+        }}
+        .google-logo {{
+            width: 20px;
+            height: 20px;
+        }}
+        </style>
 
-            if "idToken" in res:
-                st.session_state.user = res
-                st.success("Connexion Google réussie !")
-                st.rerun()
-            else:
-                st.error("Erreur Google Login")
+        <a href="{google_auth_url}">
+            <div class="google-btn">
+                <img class="google-logo" src="https://upload.wikimedia.org/wikipedia/commons/5/53/Google_%22G%22_Logo.svg">
+                Se connecter avec Google
+            </div>
+        </a>
+        """
+
+        st.markdown(google_button, unsafe_allow_html=True)
 
     st.stop()
 
@@ -123,8 +173,8 @@ if st.session_state.user is None:
 # ---------------------------------------------------
 # 🎉 UTILISATEUR CONNECTÉ
 # ---------------------------------------------------
-st.sidebar.title("User Menu")
-st.sidebar.write(f"👤 Connecté en tant que : {st.session_state.user.get('email', 'Google User')}")
+st.sidebar.title("Menu")
+st.sidebar.write(f"👤 Connecté : {st.session_state.user.get('email', 'Google User')}")
 
 if st.sidebar.button("Logout"):
     st.session_state.user = None
@@ -136,7 +186,7 @@ st.title("🎮 Quiz : Computing 1960s")
 
 
 # ---------------------------------------------------
-# 📚 QUIZ QUESTIONS
+# 📚 QUESTIONS
 # ---------------------------------------------------
 questions = [
     {
